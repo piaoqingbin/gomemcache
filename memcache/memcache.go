@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -64,12 +65,14 @@ var (
 	ErrNoServers = errors.New("memcache: no servers configured or available")
 )
 
-// DefaultTimeout is the default socket read/write timeout.
-const DefaultTimeout = 100 * time.Millisecond
-
 const (
-	buffered            = 8 // arbitrary buffered channel size, for readability
-	maxIdleConnsPerAddr = 2 // TODO(bradfitz): make this configurable?
+	// DefaultTimeout is the default socket read/write timeout.
+	DefaultTimeout = 100 * time.Millisecond
+
+	// maxIdleConnsPerAddr
+	DefaultMaxIdleConns = 2
+
+	buffered = 8 // arbitrary buffered channel size, for readability
 )
 
 // resumableError returns true if err is only a protocol-level cache error.
@@ -123,7 +126,10 @@ func New(server ...string) *Client {
 
 // NewFromSelector returns a new Client using the provided ServerSelector.
 func NewFromSelector(ss ServerSelector) *Client {
-	return &Client{selector: ss}
+	return &Client{
+		selector:     ss,
+		maxIdelConns: DefaultMaxIdleConns,
+	}
 }
 
 // Client is a memcache client.
@@ -135,8 +141,9 @@ type Client struct {
 
 	selector ServerSelector
 
-	lk       sync.Mutex
-	freeconn map[string][]*conn
+	lk           sync.Mutex
+	freeconn     map[string][]*conn
+	maxIdleConns uint32
 }
 
 // Item is an item to be got or stored in a memcached server.
@@ -199,7 +206,7 @@ func (c *Client) putFreeConn(addr net.Addr, cn *conn) {
 		c.freeconn = make(map[string][]*conn)
 	}
 	freelist := c.freeconn[addr.String()]
-	if len(freelist) >= maxIdleConnsPerAddr {
+	if len(freelist) >= c.maxIdleConns {
 		cn.nc.Close()
 		return
 	}
@@ -226,6 +233,12 @@ func (c *Client) netTimeout() time.Duration {
 		return c.Timeout
 	}
 	return DefaultTimeout
+}
+
+func (c *Client) SetMaxIdleConns(v uint32) {
+	c.lk.Lock()
+	defer c.lk.Unlock()
+	c.maxIdleConns = v
 }
 
 // ConnectTimeoutError is the error type used when it takes
@@ -666,4 +679,15 @@ func (c *Client) incrDecr(verb, key string, delta uint64) (uint64, error) {
 		return nil
 	})
 	return val, err
+}
+
+func (c *Client) Close() {
+	c.lk.Lock()
+	defer c.lk.Unlock()
+	for _, freelist := range c.freeconn {
+		for i := 0; i < len(freelist); i++ {
+			freelist[i].nc.Close()
+		}
+	}
+	c.maxIdleConns = 0
 }
