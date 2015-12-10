@@ -29,7 +29,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -128,7 +127,7 @@ func New(server ...string) *Client {
 func NewFromSelector(ss ServerSelector) *Client {
 	return &Client{
 		selector:     ss,
-		maxIdelConns: DefaultMaxIdleConns,
+		maxIdleConns: DefaultMaxIdleConns,
 	}
 }
 
@@ -206,7 +205,7 @@ func (c *Client) putFreeConn(addr net.Addr, cn *conn) {
 		c.freeconn = make(map[string][]*conn)
 	}
 	freelist := c.freeconn[addr.String()]
-	if len(freelist) >= c.maxIdleConns {
+	if len(freelist) >= int(c.maxIdleConns) {
 		cn.nc.Close()
 		return
 	}
